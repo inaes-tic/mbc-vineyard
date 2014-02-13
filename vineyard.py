@@ -5,9 +5,13 @@ import logging
 import sys, os, shutil
 import uuid
 import re
+import json
+from string import Template
 
 from gi.repository import GLib, GObject, Gtk, WebKit, JSCore, Soup
 from xdg.BaseDirectory import xdg_cache_home
+
+from mbczcbrowse import MBCZeroconfBrowser
 
 class Vineyard(GObject.GObject):
     def __init__(self):
@@ -15,6 +19,11 @@ class Vineyard(GObject.GObject):
         self.window = window = Gtk.Window()
         self.inspectorWindow = Gtk.Window()
         self.session = WebKit.get_default_session()
+        self.zcbrowser = MBCZeroconfBrowser()
+
+        self.services = {}
+        self.zcbrowser.connect('service-up', self.on_new_service)
+        self.zcbrowser.connect('service-down', self.on_service_removed)
 
         self.webView = webView = WebKit.WebView()
         window.add(webView)
@@ -65,15 +74,13 @@ class Vineyard(GObject.GObject):
 
     def window_object_cleared_cb (self, view, frame, context, window_object, data=None):
         # we can inject custom stuff either executing some js or touching the context.
-        vinejs = """
+        vinejs = Template("""
             window.Vineyard = {
-                services: {},
+                services: $services,
                 onServiceAdded: function(serviceName, serviceInfo){},
                 onServiceRemoved: function(serviceName, serviceInfo){},
-
-
             };
-        """
+        """).substitute(services=json.dumps(self.services))
         view.execute_script (vinejs)
 
     def load_finished_cb (self, view, frame, data=None):
@@ -101,6 +108,41 @@ class Vineyard(GObject.GObject):
         cookiejar = Soup.CookieJarText.new( os.path.join(xdg_cache_home, "vineyard_cookies.txt"), False)
         cookiejar.set_accept_policy(Soup.CookieJarAcceptPolicy.ALWAYS)
         self.session.add_feature(cookiejar)
+
+    #ZeroConf callbacks.
+    def on_new_service(self, browser, name, info):
+        self.services[name] = info
+
+        name = json.dumps(name)
+        info = json.dumps(info)
+
+        vinejs = Template(u"""
+        (function(){
+            if (window.Vineyard) {
+                window.Vineyard.services[$name] = $info;
+                window.Vineyard.onServiceAdded($name, $info);
+            }
+        })();
+        """).substitute(name=name, info=info)
+        self.webView.execute_script (vinejs)
+
+    def on_service_removed(self, browser, name, info):
+        info = self.services.pop(name, None)
+        if info is None:
+            return
+
+        name = json.dumps(name)
+        info = json.dumps(info)
+
+        vinejs = Template(u"""
+        (function(){
+            if (window.Vineyard) {
+                delete window.Vineyard.services[$name];
+                window.Vineyard.onServiceRemoved($name, $info);
+            }
+        })();
+        """).substitute(name=name, info=info)
+        self.webView.execute_script (vinejs)
 
 
 if __name__ == '__main__':
